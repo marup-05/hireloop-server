@@ -45,9 +45,27 @@ app.get('/jobs', async(req, res) =>{
   res.send(result)
 })
 
+app.get('/jobs/:id', async(req, res) =>{
+  const id = req.params.id;
+  const query = {_id: new ObjectId(id)}
+  const result = await jobs.findOne(query)
+  res.send(result)
+})
+
 app.post('/jobs', async(req, res) =>{
   const job = req.body
   const result = await jobs.insertOne(job)
+  res.send(result)
+})
+
+app.patch('/jobs/:id', async(req, res) =>{
+  const id = req.params.id;
+  const filter = {_id: new ObjectId(id)}
+  const updatedJob = req.body;
+  const updateDoc = {
+    $set: updatedJob
+  }
+  const result = await jobs.updateOne(filter, updateDoc)
   res.send(result)
 })
 
