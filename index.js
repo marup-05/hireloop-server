@@ -6,7 +6,8 @@ import { MongoClient, ObjectId } from "mongodb";
 const app = express();
 
 const port = process.env.PORT || 5000;
-//middleware
+
+// middleware
 app.use(express.json());
 app.use(cors());
 
@@ -26,8 +27,14 @@ export async function connectToMongoDB() {
 
 const connectedClient = await connectToMongoDB();
 const database = connectedClient.db("hireloopdb");
+
 const users = database.collection("user");
 const jobs = database.collection("jobs");
+const applications = database.collection("applications");
+const savedJobs = database.collection("savedJobs");
+
+// Prevent duplicate saved jobs for the same user
+await savedJobs.createIndex({ userId: 1, jobId: 1 }, { unique: true });
 
 app.get("/", (req, res) => {
   res.send("hireloop is looping");
@@ -39,11 +46,12 @@ app.get("/users", async (req, res) => {
   res.send(result);
 });
 
+// ============================
+// Jobs Related API
+// ============================
 
-// jobs related api
 app.get("/jobs", async (req, res) => {
   const query = {};
-  // console.log("query", req.query);
 
   if (req.query.jobType) {
     query.jobType = {
@@ -56,9 +64,10 @@ app.get("/jobs", async (req, res) => {
     query.isRemote = req.query.isRemote === "true";
   }
 
-  if(req.query.category){
+  if (req.query.category) {
     query.category = req.query.category;
   }
+
   if (req.query.search) {
     query.$or = [
       { title: { $regex: req.query.search, $options: "i" } },
@@ -72,7 +81,6 @@ app.get("/jobs", async (req, res) => {
   const result = await cursor.toArray();
   res.send(result);
 });
-
 
 app.get("/jobs/:id", async (req, res) => {
   const id = req.params.id;
@@ -91,9 +99,11 @@ app.patch("/jobs/:id", async (req, res) => {
   const id = req.params.id;
   const filter = { _id: new ObjectId(id) };
   const updatedJob = req.body;
+
   const updateDoc = {
     $set: updatedJob,
   };
+
   const result = await jobs.updateOne(filter, updateDoc);
   res.send(result);
 });
@@ -103,6 +113,178 @@ app.delete("/jobs/:id", async (req, res) => {
   const query = { _id: new ObjectId(id) };
   const result = await jobs.deleteOne(query);
   res.send(result);
+});
+
+// ============================
+// Applications Related API
+// ============================
+
+app.get("/applications", async (req, res) => {
+  const query = {};
+
+  if (req.query.applicantId) {
+    query.userId = req.query.applicantId;
+  }
+
+  const cursor = applications.find(query);
+  const result = await cursor.toArray();
+  res.send(result);
+});
+app.get("/applications/count", async (req, res) => {
+  const query = {};
+
+  if (req.query.applicantId) {
+    query.userId = req.query.applicantId;
+  }
+   const result = await applications.countDocuments(query);
+   res.send({count: result});
+});
+
+app.post("/applications", async (req, res) => {
+  const application = req.body;
+  const result = await applications.insertOne(application);
+  res.send(result);
+});
+
+// ============================
+// Saved Jobs Related API
+// ============================
+
+// Save a job
+app.post("/saved-jobs", async (req, res) => {
+  const { userId, jobId } = req.body;
+
+  if (!userId || !jobId) {
+    return res.status(400).send({
+      message: "userId and jobId are required",
+    });
+  }
+
+  if (!ObjectId.isValid(jobId)) {
+    return res.status(400).send({
+      message: "Invalid job ID",
+    });
+  }
+
+  const jobObjectId = new ObjectId(jobId);
+
+  const job = await jobs.findOne({
+    _id: jobObjectId,
+  });
+
+  if (!job) {
+    return res.status(404).send({
+      message: "Job not found",
+    });
+  }
+
+  const existingSave = await savedJobs.findOne({
+    userId,
+    jobId: jobObjectId,
+  });
+
+  if (existingSave) {
+    return res.status(200).send({
+      message: "Job already saved",
+      saved: true,
+    });
+  }
+
+  const savedJob = {
+    userId,
+    jobId: jobObjectId,
+    savedAt: new Date(),
+  };
+
+  const result = await savedJobs.insertOne(savedJob);
+
+  res.status(201).send({
+    message: "Job saved successfully",
+    saved: true,
+    insertedId: result.insertedId,
+  });
+});
+
+// Get all saved jobs of a user
+app.get("/saved-jobs", async (req, res) => {
+  const { userId } = req.query;
+
+  if (!userId) {
+    return res.status(400).send({
+      message: "userId is required",
+    });
+  }
+
+  const result = await savedJobs
+    .aggregate([
+      {
+        $match: {
+          userId,
+        },
+      },
+      {
+        $lookup: {
+          from: "jobs",
+          localField: "jobId",
+          foreignField: "_id",
+          as: "job",
+        },
+      },
+      {
+        $unwind: "$job",
+      },
+      {
+        $project: {
+          _id: { $toString: "$_id" },
+          userId: 1,
+          jobId: { $toString: "$jobId" },
+          savedAt: 1,
+          job: 1,
+        },
+      },
+      {
+        $sort: {
+          savedAt: -1,
+        },
+      },
+    ])
+    .toArray();
+
+  res.send(result);
+});
+
+// Unsave a job
+app.delete("/saved-jobs/:jobId", async (req, res) => {
+  const { jobId } = req.params;
+  const { userId } = req.query;
+
+  if (!userId) {
+    return res.status(400).send({
+      message: "userId is required",
+    });
+  }
+
+  if (!ObjectId.isValid(jobId)) {
+    return res.status(400).send({
+      message: "Invalid job ID",
+    });
+  }
+
+  const result = await savedJobs.deleteOne({
+    userId,
+    jobId: new ObjectId(jobId),
+  });
+
+  if (result.deletedCount === 0) {
+    return res.status(404).send({
+      message: "Saved job not found",
+    });
+  }
+
+  res.send({
+    message: "Job removed from saved jobs",
+    deletedCount: result.deletedCount,
+  });
 });
 
 app.listen(port, () => {
