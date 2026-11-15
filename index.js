@@ -1,7 +1,11 @@
+
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
+import Stripe from "stripe";
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 
@@ -12,7 +16,7 @@ app.use(express.json());
 app.use(cors());
 
 const client = new MongoClient(
-  `mongodb://${process.env.DB_USER}:${process.env.DB_PASSWORD}@ac-44gdk0u-shard-00-00.l06uzuf.mongodb.net:27017,ac-44gdk0u-shard-00-01.l06uzuf.mongodb.net:27017,ac-44gdk0u-shard-00-02.l06uzuf.mongodb.net:27017/?ssl=true&replicaSet=atlas-iuroc7-shard-0&authSource=admin`,
+  `mongodb://${process.env.DB_USER}:${process.env.DB_PASSWORD}@ac-44gdk0u-shard-00-00.l06uzuf.mongodb.net:27017,ac-44gdk0u-shard-00-01.l06uzuf.mongodb.net:27017,ac-44gdk0u-shard-00-02.l06uzuf.mongodb.net:27017/?ssl=true&replicaSet=atlas-iuroc7-shard-0&authSource=admin`
 );
 
 export async function connectToMongoDB() {
@@ -32,6 +36,7 @@ const users = database.collection("user");
 const jobs = database.collection("jobs");
 const applications = database.collection("applications");
 const savedJobs = database.collection("savedJobs");
+const payments = database.collection("payments");
 
 // Prevent duplicate saved jobs for the same user
 await savedJobs.createIndex({ userId: 1, jobId: 1 }, { unique: true });
@@ -130,14 +135,16 @@ app.get("/applications", async (req, res) => {
   const result = await cursor.toArray();
   res.send(result);
 });
+
 app.get("/applications/count", async (req, res) => {
   const query = {};
 
   if (req.query.applicantId) {
     query.userId = req.query.applicantId;
   }
-   const result = await applications.countDocuments(query);
-   res.send({count: result});
+
+  const result = await applications.countDocuments(query);
+  res.send({ count: result });
 });
 
 app.post("/applications", async (req, res) => {
@@ -284,6 +291,81 @@ app.delete("/saved-jobs/:jobId", async (req, res) => {
   res.send({
     message: "Job removed from saved jobs",
     deletedCount: result.deletedCount,
+  });
+});
+
+// ============================
+// Payments Related API
+// ============================
+
+app.post("/payments/checkout-verify", async (req, res) => {
+  const { sessionId } = req.body;
+
+
+  const checkoutSession = await stripe.checkout.sessions.retrieve(sessionId);
+
+  if(!sessionId) {
+    return res.send({success: false, message: 'Session id is required'})
+  }
+
+  const {
+    id,
+    status,
+    payment_status,
+    customer_email,
+    metadata,
+    payment_intent,
+  } = checkoutSession;
+
+  if (status === "complete" && payment_status === "paid") {
+    const sessionQuery = {sessionId} 
+    const existingPayment = await payment.findOne(sessionQuery)
+    if(existingPayment){
+      return res.send({success: false, message: 'Payment already verified'}) 
+    }
+    if (!metadata?.userId || !ObjectId.isValid(metadata.userId)) {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid user ID in Stripe metadata",
+      });
+    }
+
+    const payment = {
+      sessionId: id,
+      status,
+      payment_status,
+      customer_email,
+      userId: metadata.userId,
+      payment_date: new Date(),
+      payment_intent,
+    };
+
+    const result = await payments.insertOne(payment);
+
+    const query = {
+      _id: new ObjectId(metadata.userId),
+    };
+
+    const updateDoc = {
+      $set: {
+        premium: true,
+      },
+    };
+
+    const updateResult = await users.updateOne(query, updateDoc);
+
+    res.send({
+      success: true,
+      result,
+      updateResult,
+    });
+
+    return;
+  }
+
+  res.send({
+    success: false,
+    message: "Payment verification failed",
   });
 });
 
