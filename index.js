@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
+import { randomUUID } from "node:crypto";
 import Stripe from "stripe";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -39,24 +40,46 @@ const savedJobs = database.collection("savedJobs");
 const payments = database.collection("payments");
 
 // Prevent duplicate saved jobs for the same user
-await savedJobs.createIndex({ userId: 1, jobId: 1 }, { unique: true });
+await savedJobs.createIndex(
+  { userId: 1, jobId: 1 },
+  { unique: true }
+);
+
+// Prevent duplicate jobId
+await jobs.createIndex(
+  { jobId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      jobId: { $type: "string" },
+    },
+  }
+);
 
 app.get("/", (req, res) => {
   res.send("hireloop is looping");
 });
-//users related api
+
+// ============================
+// Users Related API
+// ============================
+
 app.get("/users", async (req, res) => {
   const cursor = users.find({});
   const result = await cursor.toArray();
   res.send(result);
 });
 
-app.get('/users/:id/premium', async(req, res) =>{
+app.get("/users/:id/premium", async (req, res) => {
   const id = req.params.id;
-  const query = {_id: new ObjectId(id)}
-  const result = await users.findOne(query, {projection: {premium: 1}})
-  res.send(result)
-})
+  const query = { _id: new ObjectId(id) };
+
+  const result = await users.findOne(query, {
+    projection: { premium: 1 },
+  });
+
+  res.send(result);
+});
 
 // ============================
 // Jobs Related API
@@ -64,6 +87,8 @@ app.get('/users/:id/premium', async(req, res) =>{
 
 app.get("/jobs", async (req, res) => {
   const query = {};
+
+  console.log("Received query params:", req.query);
 
   if (req.query.jobType) {
     query.jobType = {
@@ -80,33 +105,54 @@ app.get("/jobs", async (req, res) => {
     query.category = req.query.category;
   }
 
+  if (req.query.recruiterId) {
+    query.recruiterId = req.query.recruiterId;
+  }
+
   if (req.query.search) {
     query.$or = [
       { title: { $regex: req.query.search, $options: "i" } },
       { company: { $regex: req.query.search, $options: "i" } },
       { responsibilities: { $regex: req.query.search, $options: "i" } },
+      { qualifications: { $regex: req.query.search, $options: "i" } },
       { requirements: { $regex: req.query.search, $options: "i" } },
     ];
   }
 
-  const cursor = jobs.find(query);
-  const result = await cursor.toArray();
+  console.log("MongoDB filter:", query);
+
+  const result = await jobs.find(query).toArray();
+
+  console.log("Jobs found:", result.length);
+
   res.send(result);
 });
 
+// Get single job by MongoDB _id
 app.get("/jobs/:id", async (req, res) => {
   const id = req.params.id;
   const query = { _id: new ObjectId(id) };
+
   const result = await jobs.findOne(query);
+
   res.send(result);
 });
 
+// Create new job with automatic jobId
 app.post("/jobs", async (req, res) => {
   const job = req.body;
+
+  job.jobId = `JOB-${randomUUID()}`;
+
   const result = await jobs.insertOne(job);
-  res.send(result);
+
+  res.status(201).send({
+    ...result,
+    jobId: job.jobId,
+  });
 });
 
+// Update job
 app.patch("/jobs/:id", async (req, res) => {
   const id = req.params.id;
   const filter = { _id: new ObjectId(id) };
@@ -117,13 +163,17 @@ app.patch("/jobs/:id", async (req, res) => {
   };
 
   const result = await jobs.updateOne(filter, updateDoc);
+
   res.send(result);
 });
 
+// Delete job
 app.delete("/jobs/:id", async (req, res) => {
   const id = req.params.id;
   const query = { _id: new ObjectId(id) };
+
   const result = await jobs.deleteOne(query);
+
   res.send(result);
 });
 
@@ -138,8 +188,13 @@ app.get("/applications", async (req, res) => {
     query.userId = req.query.applicantId;
   }
 
+  if (req.query.jobId) {
+    query.jobId = req.query.jobId;
+  }
+
   const cursor = applications.find(query);
   const result = await cursor.toArray();
+
   res.send(result);
 });
 
@@ -151,12 +206,15 @@ app.get("/applications/count", async (req, res) => {
   }
 
   const result = await applications.countDocuments(query);
+
   res.send({ count: result });
 });
 
 app.post("/applications", async (req, res) => {
   const application = req.body;
+
   const result = await applications.insertOne(application);
+
   res.send(result);
 });
 
@@ -304,7 +362,6 @@ app.delete("/saved-jobs/:jobId", async (req, res) => {
 // ============================
 // Payments Related API
 // ============================
-
 
 app.post("/payments/checkout-verify", async (req, res) => {
   try {
