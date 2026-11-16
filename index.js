@@ -44,12 +44,19 @@ await savedJobs.createIndex({ userId: 1, jobId: 1 }, { unique: true });
 app.get("/", (req, res) => {
   res.send("hireloop is looping");
 });
-
+//users related api
 app.get("/users", async (req, res) => {
   const cursor = users.find({});
   const result = await cursor.toArray();
   res.send(result);
 });
+
+app.get('/users/:id/premium', async(req, res) =>{
+  const id = req.params.id;
+  const query = {_id: new ObjectId(id)}
+  const result = await users.findOne(query, {projection: {premium: 1}})
+  res.send(result)
+})
 
 // ============================
 // Jobs Related API
@@ -298,31 +305,53 @@ app.delete("/saved-jobs/:jobId", async (req, res) => {
 // Payments Related API
 // ============================
 
+
 app.post("/payments/checkout-verify", async (req, res) => {
-  const { sessionId } = req.body;
+  try {
+    const { sessionId } = req.body;
 
-
-  const checkoutSession = await stripe.checkout.sessions.retrieve(sessionId);
-
-  if(!sessionId) {
-    return res.send({success: false, message: 'Session id is required'})
-  }
-
-  const {
-    id,
-    status,
-    payment_status,
-    customer_email,
-    metadata,
-    payment_intent,
-  } = checkoutSession;
-
-  if (status === "complete" && payment_status === "paid") {
-    const sessionQuery = {sessionId} 
-    const existingPayment = await payment.findOne(sessionQuery)
-    if(existingPayment){
-      return res.send({success: false, message: 'Payment already verified'}) 
+    // 1. Check session ID
+    if (!sessionId) {
+      return res.status(400).send({
+        success: false,
+        message: "Session id is required",
+      });
     }
+
+    // 2. Retrieve Stripe checkout session
+    const checkoutSession =
+      await stripe.checkout.sessions.retrieve(sessionId);
+
+    const {
+      id,
+      status,
+      payment_status,
+      customer_email,
+      metadata,
+      payment_intent,
+    } = checkoutSession;
+
+    // 3. Verify payment status
+    if (status !== "complete" || payment_status !== "paid") {
+      return res.send({
+        success: false,
+        message: "Payment verification failed",
+      });
+    }
+
+    // 4. Check existing payment
+    const sessionQuery = { sessionId: id };
+
+    const existingPayment = await payments.findOne(sessionQuery);
+
+    if (existingPayment) {
+      return res.send({
+        success: true,
+        message: "Payment already verified",
+      });
+    }
+
+    // 5. Validate user ID
     if (!metadata?.userId || !ObjectId.isValid(metadata.userId)) {
       return res.status(400).send({
         success: false,
@@ -330,7 +359,8 @@ app.post("/payments/checkout-verify", async (req, res) => {
       });
     }
 
-    const payment = {
+    // 6. Save payment information
+    const paymentData = {
       sessionId: id,
       status,
       payment_status,
@@ -340,8 +370,9 @@ app.post("/payments/checkout-verify", async (req, res) => {
       payment_intent,
     };
 
-    const result = await payments.insertOne(payment);
+    const result = await payments.insertOne(paymentData);
 
+    // 7. Make user premium
     const query = {
       _id: new ObjectId(metadata.userId),
     };
@@ -354,19 +385,21 @@ app.post("/payments/checkout-verify", async (req, res) => {
 
     const updateResult = await users.updateOne(query, updateDoc);
 
+    // 8. Send response
     res.send({
       success: true,
       result,
       updateResult,
     });
 
-    return;
-  }
+  } catch (error) {
+    console.log("Checkout verification error:", error);
 
-  res.send({
-    success: false,
-    message: "Payment verification failed",
-  });
+    res.status(500).send({
+      success: false,
+      message: error.message,
+    });
+  }
 });
 
 app.listen(port, () => {
